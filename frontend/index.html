@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Software Factory Lab</title>
+    <style>
+      :root {
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #102033;
+        background: #168CD0;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(920px, calc(100% - 48px));
+        background: white;
+        border-radius: 28px;
+        padding: 36px;
+        box-shadow: 0 24px 70px rgba(20, 45, 75, 0.18);
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        font-size: 12px;
+        font-weight: 800;
+        color: #426b9a;
+      }
+      h1 {
+        margin: 10px 0 14px;
+        font-size: clamp(32px, 5vw, 58px);
+        line-height: 1;
+      }
+      p {
+        color: #4b5f75;
+        font-size: 18px;
+        line-height: 1.55;
+      }
+      .grid {
+        margin-top: 28px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        border: 1px solid #dbe7f3;
+        border-radius: 20px;
+        padding: 18px;
+        background: #168CD0;
+      }
+      .label {
+        font-size: 13px;
+        color: #60758b;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .value {
+        margin-top: 8px;
+        font-size: 22px;
+        font-weight: 800;
+        word-break: break-word;
+      }
+      button {
+        margin-top: 26px;
+        border: 0;
+        border-radius: 999px;
+        padding: 14px 22px;
+        font-size: 16px;
+        font-weight: 800;
+        cursor: pointer;
+        background: #168CD0;
+        color: white;
+      }
+      code {
+        background: #168CD0;
+        padding: 2px 6px;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="eyebrow">K3s / Vagrant / Ansible</div>
+      <h1>Software Factory Lab</h1>
+      <p>
+        This frontend is deployed on Kubernetes. It calls a separate backend service, and the backend writes to MySQL using NFS-backed storage from the Tools VM.
+      </p>
+
+      <div class="grid">
+        <div class="card">
+          <div class="label">Backend status</div>
+          <div id="backend-status" class="value">Checking...</div>
+        </div>
+        <div class="card">
+          <div class="label">MySQL</div>
+          <div id="mysql-status" class="value">Checking...</div>
+        </div>
+        <div class="card">
+          <div class="label">Visit counter</div>
+          <div id="visit-count" class="value">-</div>
+        </div>
+      </div>
+
+      <p id="demo-version">Demo update pushed at 2026-05-09 02:42:52 — background #168CD0</p>
+      <button id="visit-button">Write a visit to MySQL</button>
+      <p id="details"></p>
+    </main>
+
+    <script>
+      async function refreshStatus() {
+        const response = await fetch('/api/status');
+        const data = await response.json();
+        document.getElementById('backend-status').textContent = `${data.status} / ${data.hostname || 'unknown pod'}`;
+        document.getElementById('mysql-status').textContent = data.mysql?.reachable ? `Connected to ${data.mysql.database}` : 'Not reachable';
+        document.getElementById('details').innerHTML = `Backend image version: <code>${data.version}</code>`;
+      }
+
+      async function writeVisit() {
+        const response = await fetch('/api/visits', { method: 'POST' });
+        const data = await response.json();
+        document.getElementById('visit-count').textContent = data.total_visits;
+        document.getElementById('details').innerHTML = `Last write handled by backend pod <code>${data.backend_pod}</code>`;
+      }
+
+      document.getElementById('visit-button').addEventListener('click', writeVisit);
+      refreshStatus().catch((error) => {
+        document.getElementById('backend-status').textContent = 'Error';
+        document.getElementById('mysql-status').textContent = error.message;
+      });
+    </script>
+  </body>
+</html>
