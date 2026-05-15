@@ -1,0 +1,40 @@
+---
+- name: Install NFS server packages
+  ansible.builtin.apt:
+    name:
+      - nfs-kernel-server
+    state: present
+    update_cache: true
+
+- name: Ensure exports.d directory exists
+  ansible.builtin.file:
+    path: /etc/exports.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create NFS export directory for MySQL
+  ansible.builtin.file:
+    path: "{{ nfs_mysql_export_path }}"
+    state: directory
+    owner: nobody
+    group: nogroup
+    mode: '0777'
+
+- name: Configure exports file
+  ansible.builtin.copy:
+    dest: /etc/exports.d/iac-k8s.exports
+    mode: '0644'
+    content: |
+      {{ nfs_mysql_export_path }} {{ nfs_exports_network }}(rw,sync,no_subtree_check,no_root_squash)
+
+- name: Export NFS shares
+  ansible.builtin.command: exportfs -ra
+  changed_when: true
+
+- name: Enable and start NFS server
+  ansible.builtin.systemd:
+    name: nfs-kernel-server
+    enabled: true
+    state: started

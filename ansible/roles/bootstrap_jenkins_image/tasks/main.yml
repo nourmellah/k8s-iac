@@ -1,0 +1,42 @@
+---
+- name: Wait for Nexus Docker registry before publishing Jenkins support images
+  ansible.builtin.uri:
+    url: "http://{{ nexus_registry_host }}/v2/"
+    method: GET
+    status_code: [200, 401]
+    return_content: false
+    use_proxy: false
+  register: jenkins_registry_wait
+  retries: 60
+  delay: 5
+  until: jenkins_registry_wait.status in [200, 401]
+
+- name: Log in to Nexus Docker registry with Podman for Jenkins image publishing
+  ansible.builtin.shell: |
+    podman login --tls-verify=false -u {{ nexus_admin_user }} -p {{ nexus_admin_password }} {{ nexus_registry_host }}
+  changed_when: true
+  no_log: true
+
+- name: Build custom Jenkins controller image with required plugins preinstalled
+  ansible.builtin.shell: |
+    podman build \
+      -t {{ jenkins_controller_image_name }}:{{ jenkins_controller_image_tag }} \
+      /vagrant/jenkins-controller
+  changed_when: true
+
+- name: Push custom Jenkins controller image to Nexus
+  ansible.builtin.shell: |
+    podman push --tls-verify=false {{ jenkins_controller_image_name }}:{{ jenkins_controller_image_tag }}
+  changed_when: true
+
+- name: Build custom kubectl Jenkins agent image
+  ansible.builtin.shell: |
+    podman build \
+      -t {{ jenkins_kubectl_agent_image_name }}:{{ jenkins_kubectl_agent_image_tag }} \
+      /vagrant/ci-agent/kubectl
+  changed_when: true
+
+- name: Push custom kubectl Jenkins agent image to Nexus
+  ansible.builtin.shell: |
+    podman push --tls-verify=false {{ jenkins_kubectl_agent_image_name }}:{{ jenkins_kubectl_agent_image_tag }}
+  changed_when: true

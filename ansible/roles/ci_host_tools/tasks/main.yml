@@ -1,0 +1,45 @@
+---
+- name: Install Tools VM packages
+  ansible.builtin.apt:
+    name:
+      - podman
+      - git
+      - curl
+      - jq
+      - rsync
+      - python3-requests
+    state: present
+    update_cache: true
+
+- name: Enable Podman restart service for containers with restart policies
+  ansible.builtin.systemd:
+    name: podman-restart.service
+    enabled: true
+    daemon_reload: true
+  failed_when: false
+
+
+- name: Ensure the Tools VM is not running as a K3s worker
+  ansible.builtin.shell: |
+    systemctl stop k3s-agent >/dev/null 2>&1 || true
+    systemctl disable k3s-agent >/dev/null 2>&1 || true
+    /usr/local/bin/k3s-agent-uninstall.sh >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/k3s-agent.service /etc/systemd/system/k3s-agent.service.env
+    systemctl daemon-reload
+  args:
+    executable: /bin/bash
+  changed_when: false
+  failed_when: false
+
+- name: Create persistent service data directories on Tools VM
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /opt/iac-k8s-services
+    - /opt/iac-k8s-services/gitea
+    - /opt/iac-k8s-services/nexus
+    - /opt/iac-k8s-services/git-seed

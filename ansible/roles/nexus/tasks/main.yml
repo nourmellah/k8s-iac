@@ -1,0 +1,173 @@
+---
+- name: Ensure Nexus data directory is writable by the Nexus container user
+  ansible.builtin.file:
+    path: /opt/iac-k8s-services/nexus
+    state: directory
+    owner: "200"
+    group: "200"
+    mode: "0755"
+
+- name: Start Nexus on the Tools VM
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    podman rm -f nexus >/dev/null 2>&1 || true
+
+    podman run -d \
+      --name nexus \
+      --restart=always \
+      -p 30083:8081 \
+      -p 30084:8082 \
+      -e INSTALL4J_ADD_VM_PARAMS='-Xms256m -Xmx768m -XX:MaxDirectMemorySize=256m -Djava.util.prefs.userRoot=/nexus-data/javaprefs' \
+      -v /opt/iac-k8s-services/nexus:/nexus-data \
+      docker.io/sonatype/nexus3:3.70.5-java11-ubi
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: Wait for Nexus UI to become reachable on the Tools VM
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/status"
+    method: GET
+    status_code: [200, 503]
+    return_content: false
+    use_proxy: false
+  register: nexus_status
+  retries: 120
+  delay: 5
+  until: nexus_status.status in [200, 503]
+
+- name: Wait for Nexus writable API
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/status/writable"
+    method: GET
+    status_code: 200
+    return_content: false
+    use_proxy: false
+  register: nexus_writable
+  retries: 120
+  delay: 5
+  until: nexus_writable.status == 200
+
+- name: Check whether desired Nexus admin password already works
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/security/realms/active"
+    method: GET
+    user: "{{ nexus_admin_user }}"
+    password: "{{ nexus_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 401, 403, 500, 502, 503, 504]
+    use_proxy: false
+  register: nexus_admin_login_check
+  changed_when: false
+  retries: 30
+  delay: 5
+  until:
+    - nexus_admin_login_check.status is defined
+    - nexus_admin_login_check.status in [200, 401]
+
+- name: Wait for initial Nexus admin password file if lab password is not active yet
+  ansible.builtin.wait_for:
+    path: /opt/iac-k8s-services/nexus/admin.password
+    timeout: 300
+  when: nexus_admin_login_check.status == 401
+
+- name: Read initial Nexus admin password
+  ansible.builtin.slurp:
+    src: /opt/iac-k8s-services/nexus/admin.password
+  register: nexus_initial_admin_password
+  when: nexus_admin_login_check.status == 401
+  no_log: true
+
+- name: Set Nexus admin password to the lab value
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/security/users/admin/change-password"
+    method: PUT
+    user: "{{ nexus_admin_user }}"
+    password: "{{ nexus_initial_admin_password.content | b64decode | trim }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: text/plain
+    body: "{{ nexus_admin_password }}"
+    status_code: 204
+    use_proxy: false
+  when: nexus_admin_login_check.status == 401
+  no_log: true
+
+- name: Check whether hosted Docker repository exists
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/repositories/docker/hosted/docker-hosted"
+    method: GET
+    user: "{{ nexus_admin_user }}"
+    password: "{{ nexus_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+    use_proxy: false
+  register: nexus_docker_repo_check
+  changed_when: false
+  no_log: true
+
+- name: Create hosted Docker repository on internal connector port 8082
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/repositories/docker/hosted"
+    method: POST
+    user: "{{ nexus_admin_user }}"
+    password: "{{ nexus_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: docker-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: true
+        writePolicy: ALLOW
+      docker:
+        v1Enabled: false
+        forceBasicAuth: true
+        httpPort: 8082
+    status_code: 201
+    use_proxy: false
+  when: nexus_docker_repo_check.status == 404
+  no_log: true
+
+- name: Update hosted Docker repository connector on rerun if needed
+  ansible.builtin.uri:
+    url: "{{ nexus_ui_url }}/service/rest/v1/repositories/docker/hosted/docker-hosted"
+    method: PUT
+    user: "{{ nexus_admin_user }}"
+    password: "{{ nexus_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: docker-hosted
+      online: true
+      storage:
+        blobStoreName: default
+        strictContentTypeValidation: true
+        writePolicy: ALLOW
+      docker:
+        v1Enabled: false
+        forceBasicAuth: true
+        httpPort: 8082
+    status_code: 204
+    use_proxy: false
+  when: >-
+    nexus_docker_repo_check.status == 200 and
+    (
+      (nexus_docker_repo_check.json.docker.httpPort | default(0) | int) != 8082 or
+      not (nexus_docker_repo_check.json.docker.forceBasicAuth | default(false) | bool)
+    )
+  no_log: true
+
+- name: Wait for Nexus Docker Registry endpoint
+  ansible.builtin.uri:
+    url: "http://{{ nexus_registry_host }}/v2/"
+    method: GET
+    status_code: [200, 401]
+    return_content: false
+    use_proxy: false
+  register: nexus_registry_ready
+  retries: 60
+  delay: 5
+  until: nexus_registry_ready.status in [200, 401]

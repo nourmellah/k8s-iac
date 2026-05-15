@@ -1,0 +1,19 @@
+---
+- name: Wait for cluster to become ready
+  ansible.builtin.shell: kubectl get nodes
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: kubectl_nodes
+  retries: 30
+  delay: 10
+  until: kubectl_nodes.rc == 0
+  changed_when: false
+
+- name: Create namespaces used inside Kubernetes
+  ansible.builtin.shell: |
+    kubectl apply -f {{ project_root_remote }}/kubernetes/namespaces/hello.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/namespaces/database.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/namespaces/jenkins.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true

@@ -1,0 +1,23 @@
+---
+- name: Ensure .kube directory exists for vagrant user
+  ansible.builtin.file:
+    path: /home/vagrant/.kube
+    state: directory
+    owner: vagrant
+    group: vagrant
+    mode: '0700'
+
+- name: Copy kubeconfig for vagrant user
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    remote_src: true
+    dest: /home/vagrant/.kube/config
+    owner: vagrant
+    group: vagrant
+    mode: '0600'
+
+- name: Replace localhost server in kubeconfig with control-plane IP
+  ansible.builtin.replace:
+    path: /home/vagrant/.kube/config
+    regexp: 'https://127\.0\.0\.1:6443'
+    replace: 'https://{{ k3s_server_ip }}:6443'

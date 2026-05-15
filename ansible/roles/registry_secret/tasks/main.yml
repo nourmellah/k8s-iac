@@ -1,0 +1,24 @@
+---
+- name: Create image pull secret for the application namespace
+  ansible.builtin.shell: |
+    kubectl -n {{ app_namespace }} create secret docker-registry nexus-registry-cred \
+      --docker-server={{ nexus_registry_host }} \
+      --docker-username={{ nexus_admin_user }} \
+      --docker-password={{ nexus_admin_password }} \
+      --dry-run=client -o yaml | kubectl apply -f -
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+  no_log: true
+
+- name: Create image pull secret for the Jenkins namespace
+  ansible.builtin.shell: |
+    kubectl -n {{ jenkins_namespace }} create secret docker-registry nexus-registry-cred \
+      --docker-server={{ nexus_registry_host }} \
+      --docker-username={{ nexus_admin_user }} \
+      --docker-password={{ nexus_admin_password }} \
+      --dry-run=client -o yaml | kubectl apply -f -
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+  no_log: true

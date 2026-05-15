@@ -1,0 +1,136 @@
+---
+- name: Ensure Gitea data directory exists
+  ansible.builtin.file:
+    path: /opt/iac-k8s-services/gitea
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Start Gitea on the Tools VM
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    podman rm -f gitea >/dev/null 2>&1 || true
+
+    podman run -d \
+      --name gitea \
+      --restart=always \
+      -p 30082:3000 \
+      -p 30222:22 \
+      -e USER_UID=1000 \
+      -e USER_GID=1000 \
+      -e GITEA__database__DB_TYPE=sqlite3 \
+      -e GITEA__server__ROOT_URL="{{ gitea_url }}/" \
+      -e GITEA__server__HTTP_PORT=3000 \
+      -e GITEA__service__DISABLE_REGISTRATION=true \
+      -e GITEA__security__INSTALL_LOCK=true \
+      -e GITEA__webhook__ALLOWED_HOST_LIST='*' \
+      -v /opt/iac-k8s-services/gitea:/data \
+      docker.io/gitea/gitea:1.22.6
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: Wait for Gitea HTTP endpoint
+  ansible.builtin.uri:
+    url: "{{ gitea_url }}/"
+    method: GET
+    status_code: [200, 301, 302, 303]
+    follow_redirects: none
+    return_content: false
+    use_proxy: false
+  register: gitea_http
+  retries: 90
+  delay: 5
+  until: gitea_http.status in [200, 301, 302, 303]
+
+- name: Check whether Gitea admin user already exists
+  ansible.builtin.shell: |
+    podman exec --user git gitea gitea admin user list | grep -Fq "{{ gitea_admin_user }}"
+  args:
+    executable: /bin/bash
+  register: gitea_admin_exists
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Create Gitea admin user
+  ansible.builtin.shell: |
+    podman exec --user git gitea gitea admin user create \
+      --username "{{ gitea_admin_user }}" \
+      --password "{{ gitea_admin_password }}" \
+      --email "{{ gitea_admin_user }}@lab.local" \
+      --admin \
+      --must-change-password=false
+  args:
+    executable: /bin/bash
+  register: gitea_admin_create
+  when: gitea_admin_exists.rc != 0
+  changed_when: gitea_admin_create.rc == 0
+  failed_when:
+    - gitea_admin_create.rc != 0
+    - "'already exists' not in (gitea_admin_create.stderr | default(''))"
+  no_log: true
+
+- name: Check whether the application repository exists in Gitea
+  ansible.builtin.uri:
+    url: "{{ gitea_url }}/api/v1/repos/{{ gitea_admin_user }}/{{ gitea_repo_name }}"
+    method: GET
+    user: "{{ gitea_admin_user }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+    use_proxy: false
+  register: gitea_repo_check
+  changed_when: false
+  no_log: true
+
+- name: Create application repository in Gitea
+  ansible.builtin.uri:
+    url: "{{ gitea_url }}/api/v1/user/repos"
+    method: POST
+    user: "{{ gitea_admin_user }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: "{{ gitea_repo_name }}"
+      private: false
+      auto_init: false
+      default_branch: main
+      description: "Software Factory demo repository: frontend, backend, Kubernetes manifests and Jenkinsfile."
+    status_code: 201
+    use_proxy: false
+  when: gitea_repo_check.status == 404
+  no_log: true
+
+- name: Seed or update the Gitea repository with the current project
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    workdir=/opt/iac-k8s-services/git-seed/{{ gitea_repo_name }}
+    rm -rf "$workdir"
+    mkdir -p "$workdir"
+
+    rsync -a --delete \
+      --exclude='.git' \
+      --exclude='.vagrant' \
+      --exclude='*.log' \
+      --exclude='cp1:' \
+      --exclude='.vault-pass' \
+      --exclude='ansible/inventories/dev/group_vars/vault.yml' \
+      /vagrant/ "$workdir/"
+
+    cd "$workdir"
+    git init -b main
+    git config user.email "{{ gitea_admin_user }}@lab.local"
+    git config user.name "{{ gitea_admin_user }}"
+    git add -A
+    git commit -m "Seed software factory application" || git commit --allow-empty -m "Seed software factory application"
+    git remote add origin "http://{{ gitea_admin_user }}:{{ gitea_admin_password }}@127.0.0.1:30082/{{ gitea_admin_user }}/{{ gitea_repo_name }}.git"
+    git push -u origin main --force
+  args:
+    executable: /bin/bash
+  changed_when: true
+  no_log: true

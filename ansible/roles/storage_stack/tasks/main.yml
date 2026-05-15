@@ -1,0 +1,28 @@
+---
+- name: Check existing MySQL NFS PV server if present
+  ansible.builtin.shell: |
+    kubectl get pv mysql-nfs-pv -o jsonpath='{.spec.nfs.server}' 2>/dev/null || true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: existing_mysql_pv_server
+  changed_when: false
+  failed_when: false
+
+- name: Remove stale MySQL NFS PV/PVC if it points to the old server
+  ansible.builtin.shell: |
+    kubectl -n {{ database_namespace }} delete pvc mysql-nfs-pvc --ignore-not-found=true
+    kubectl delete pv mysql-nfs-pv --ignore-not-found=true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  when:
+    - existing_mysql_pv_server.stdout | trim != ""
+    - existing_mysql_pv_server.stdout | trim != nfs_server_ip
+  changed_when: true
+
+- name: Deploy NFS-backed storage resources for MySQL
+  ansible.builtin.shell: |
+    kubectl apply -f {{ project_root_remote }}/kubernetes/storage/mysql-nfs-pv.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/storage/mysql-nfs-pvc.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true

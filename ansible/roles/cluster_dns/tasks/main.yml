@@ -1,0 +1,54 @@
+---
+- name: Configure CoreDNS to use VirtualBox NAT DNS
+  ansible.builtin.shell: |
+    cat <<'EOF' | kubectl apply -f -
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: coredns
+      namespace: kube-system
+    data:
+      Corefile: |
+        .:53 {
+            errors
+            health
+            ready
+            kubernetes cluster.local in-addr.arpa ip6.arpa {
+              pods insecure
+              fallthrough in-addr.arpa ip6.arpa
+              ttl 30
+            }
+            hosts /etc/coredns/NodeHosts {
+              ttl 60
+              reload 15s
+              fallthrough
+            }
+            prometheus :9153
+            forward . 10.0.2.3
+            cache 30
+            loop
+            reload
+            loadbalance
+            import /etc/coredns/custom/*.override
+        }
+        import /etc/coredns/custom/*.server
+    EOF
+  args:
+    executable: /bin/bash
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+
+- name: Restart CoreDNS
+  ansible.builtin.shell: |
+    kubectl -n kube-system rollout restart deployment/coredns
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+
+- name: Wait for CoreDNS rollout
+  ansible.builtin.shell: |
+    kubectl -n kube-system rollout status deployment/coredns --timeout=300s
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false

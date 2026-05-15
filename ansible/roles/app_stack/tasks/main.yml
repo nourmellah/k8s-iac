@@ -1,0 +1,79 @@
+---
+- name: Deploy backend resources
+  ansible.builtin.shell: |
+    kubectl apply -f {{ project_root_remote }}/kubernetes/backend/secret.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/backend/service.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/backend/pdb.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/backend/deployment.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+
+- name: Deploy frontend resources
+  ansible.builtin.shell: |
+    kubectl apply -f {{ project_root_remote }}/kubernetes/frontend/service.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/frontend/pdb.yaml
+    kubectl apply -f {{ project_root_remote }}/kubernetes/frontend/deployment.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+
+- name: Wait for backend rollout
+  block:
+    - name: Wait for backend deployment rollout
+      ansible.builtin.shell: kubectl -n {{ app_namespace }} rollout status deployment/backend --timeout=600s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+  rescue:
+    - name: Collect backend diagnostics
+      ansible.builtin.shell: |
+        kubectl -n {{ app_namespace }} get pods -o wide
+        echo
+        kubectl -n {{ app_namespace }} describe pod -l app=backend
+        echo
+        kubectl -n {{ app_namespace }} logs -l app=backend --all-containers=true --tail=200 || true
+        echo
+        kubectl -n {{ app_namespace }} get events --sort-by=.lastTimestamp | tail -n 80
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: backend_failure_state
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with backend diagnostics
+      ansible.builtin.fail:
+        msg: |
+          backend rollout failed
+
+          {{ backend_failure_state.stdout | default('') }}
+
+- name: Wait for frontend rollout
+  block:
+    - name: Wait for frontend deployment rollout
+      ansible.builtin.shell: kubectl -n {{ app_namespace }} rollout status deployment/frontend --timeout=600s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+  rescue:
+    - name: Collect frontend diagnostics
+      ansible.builtin.shell: |
+        kubectl -n {{ app_namespace }} get pods -o wide
+        echo
+        kubectl -n {{ app_namespace }} describe pod -l app=frontend
+        echo
+        kubectl -n {{ app_namespace }} logs -l app=frontend --all-containers=true --tail=200 || true
+        echo
+        kubectl -n {{ app_namespace }} get events --sort-by=.lastTimestamp | tail -n 80
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: frontend_failure_state
+      changed_when: false
+      failed_when: false
+
+    - name: Fail with frontend diagnostics
+      ansible.builtin.fail:
+        msg: |
+          frontend rollout failed
+
+          {{ frontend_failure_state.stdout | default('') }}

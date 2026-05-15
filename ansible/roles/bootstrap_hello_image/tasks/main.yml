@@ -1,0 +1,38 @@
+---
+- name: Wait for Nexus Docker registry
+  ansible.builtin.uri:
+    url: "http://{{ nexus_registry_host }}/v2/"
+    method: GET
+    status_code: [200, 401]
+    return_content: false
+    use_proxy: false
+  register: registry_wait
+  retries: 60
+  delay: 5
+  until: registry_wait.status in [200, 401]
+
+- name: Log in to Nexus Docker registry with Podman
+  ansible.builtin.shell: |
+    podman login --tls-verify=false -u {{ nexus_admin_user }} -p {{ nexus_admin_password }} {{ nexus_registry_host }}
+  changed_when: true
+  no_log: true
+
+- name: Build initial backend image on the Tools VM
+  ansible.builtin.shell: |
+    podman build -t {{ backend_image_name }}:{{ bootstrap_image_tag }} /vagrant/backend
+  changed_when: true
+
+- name: Push initial backend image to Nexus
+  ansible.builtin.shell: |
+    podman push --tls-verify=false {{ backend_image_name }}:{{ bootstrap_image_tag }}
+  changed_when: true
+
+- name: Build initial frontend image on the Tools VM
+  ansible.builtin.shell: |
+    podman build -t {{ frontend_image_name }}:{{ bootstrap_image_tag }} /vagrant/frontend
+  changed_when: true
+
+- name: Push initial frontend image to Nexus
+  ansible.builtin.shell: |
+    podman push --tls-verify=false {{ frontend_image_name }}:{{ bootstrap_image_tag }}
+  changed_when: true

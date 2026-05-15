@@ -1,0 +1,461 @@
+---
+- name: Add Jenkins Helm repository
+  ansible.builtin.shell: |
+    helm repo add jenkins https://charts.jenkins.io >/dev/null 2>&1 || true
+    helm repo update
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    HOME: /root
+  changed_when: true
+
+- name: Grant Jenkins deployment access to the application namespace
+  ansible.builtin.shell: |
+    kubectl apply -f {{ project_root_remote }}/kubernetes/jenkins/rbac-hello-namespace.yaml
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: true
+
+- name: Install or upgrade Jenkins with Helm
+  ansible.builtin.shell: |
+    helm upgrade --install jenkins jenkins/jenkins \
+      --namespace {{ jenkins_namespace }} \
+      --create-namespace \
+      --values {{ project_root_remote }}/kubernetes/jenkins/values.yaml \
+      --set-string controller.admin.username='{{ jenkins_admin_user }}' \
+      --set-string controller.admin.password='{{ jenkins_admin_password }}' \
+      --set-string controller.image.tag='{{ jenkins_controller_image_tag }}' \
+      --timeout 10m
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+    HOME: /root
+  changed_when: true
+  no_log: true
+
+- name: Wait for Jenkins StatefulSet to exist
+  ansible.builtin.shell: |
+    kubectl -n {{ jenkins_namespace }} get statefulset jenkins -o jsonpath='{.metadata.name}'
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: jenkins_sts
+  retries: 30
+  delay: 10
+  until: jenkins_sts.stdout | trim == "jenkins"
+  changed_when: false
+
+- name: Check current Jenkins pod phase
+  ansible.builtin.shell: |
+    kubectl -n {{ jenkins_namespace }} get pod jenkins-0 -o jsonpath='{.status.phase}' 2>/dev/null || true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: jenkins_pod_phase
+  changed_when: false
+  failed_when: false
+
+- name: Delete stale Jenkins pod if it is Unknown or Failed
+  ansible.builtin.shell: |
+    kubectl -n {{ jenkins_namespace }} delete pod jenkins-0 --force --grace-period=0 --ignore-not-found=true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  when: jenkins_pod_phase.stdout | trim in ["Unknown", "Failed"]
+  changed_when: true
+  failed_when: false
+
+- name: Wait for Jenkins rollout to finish
+  block:
+    - name: Wait for Jenkins rollout to finish
+      ansible.builtin.shell: |
+        kubectl -n {{ jenkins_namespace }} rollout status statefulset/jenkins --timeout=1800s
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+  rescue:
+    - name: Collect Jenkins diagnostics after rollout timeout
+      ansible.builtin.shell: |
+        set +e
+        echo "===== Jenkins pods ====="
+        kubectl -n {{ jenkins_namespace }} get pods -o wide
+        echo
+        echo "===== Jenkins PVC ====="
+        kubectl -n {{ jenkins_namespace }} get pvc
+        echo
+        echo "===== Jenkins events ====="
+        kubectl -n {{ jenkins_namespace }} get events --sort-by=.lastTimestamp | tail -80
+        echo
+        echo "===== Jenkins pod description ====="
+        kubectl -n {{ jenkins_namespace }} describe pod jenkins-0
+        echo
+        echo "===== Jenkins init container logs ====="
+        for c in $(kubectl -n {{ jenkins_namespace }} get pod jenkins-0 -o jsonpath='{range .spec.initContainers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
+          echo "--- init container: $c ---"
+          kubectl -n {{ jenkins_namespace }} logs jenkins-0 -c "$c" --tail=200 || true
+        done
+        echo
+        echo "===== Jenkins container logs ====="
+        kubectl -n {{ jenkins_namespace }} logs jenkins-0 -c jenkins --tail=200 || true
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: jenkins_rollout_diagnostics
+      changed_when: false
+      failed_when: false
+
+    - name: Print Jenkins diagnostics after rollout timeout
+      ansible.builtin.debug:
+        msg: "{{ jenkins_rollout_diagnostics.stdout }}"
+
+    - name: Fail with Jenkins diagnostic hint
+      ansible.builtin.fail:
+        msg: "Jenkins did not become Ready. The diagnostic output above usually shows whether the pod is stuck downloading plugins, waiting for the PVC, failing readiness, or hitting memory pressure."
+
+- name: Verify Jenkins is scheduled on cp1
+  ansible.builtin.shell: |
+    node_name="$(kubectl -n {{ jenkins_namespace }} get pod jenkins-0 -o jsonpath='{.spec.nodeName}')"
+    echo "$node_name"
+    test "$node_name" = "cp1"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  changed_when: false
+
+- name: Wait for Jenkins HTTP endpoint
+  ansible.builtin.uri:
+    url: "{{ jenkins_url }}/login"
+    method: GET
+    status_code: [200, 403]
+    return_content: false
+    use_proxy: false
+  register: jenkins_http_ready
+  retries: 60
+  delay: 5
+  until: jenkins_http_ready.status in [200, 403]
+
+- name: Write Jenkins job automation Groovy script
+  ansible.builtin.copy:
+    dest: /tmp/configure-software-factory-job.groovy
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      import jenkins.model.Jenkins
+      import java.io.ByteArrayInputStream
+      import com.cloudbees.plugins.credentials.CredentialsScope
+      import com.cloudbees.plugins.credentials.CredentialsProvider
+      import com.cloudbees.plugins.credentials.common.StandardCredentials
+      import com.cloudbees.plugins.credentials.domains.Domain
+      import com.cloudbees.plugins.credentials.impl.UsernamePasswordCredentialsImpl
+      import com.cloudbees.plugins.credentials.SystemCredentialsProvider
+      import org.jenkinsci.plugins.plaincredentials.impl.StringCredentialsImpl
+      import hudson.util.Secret
+
+      def instance = Jenkins.get()
+      def jobName = "{{ jenkins_job_name }}"
+      def repoUrl = "{{ gitea_repo_url }}"
+      def webhookCredentialId = "{{ gitea_webhook_credential_id }}"
+      def webhookToken = "{{ gitea_webhook_token }}"
+      def nexusCredentialId = "{{ nexus_jenkins_credentials_id }}"
+      def nexusUser = "{{ nexus_admin_user }}"
+      def nexusPassword = "{{ nexus_admin_password }}"
+      def webhookBranch = "{{ jenkins_webhook_branch }}"
+      def webhookRepo = "{{ jenkins_webhook_repo }}"
+
+      def provider = SystemCredentialsProvider.getInstance()
+      def store = provider.getStore()
+      def domain = Domain.global()
+
+      def upsertCredential = { String id, credential ->
+        def existing = CredentialsProvider.lookupCredentials(
+          StandardCredentials.class,
+          instance,
+          null,
+          null
+        ).find { it.id == id }
+
+        if (existing != null) {
+          store.removeCredentials(domain, existing)
+        }
+        store.addCredentials(domain, credential)
+        provider.save()
+      }
+
+      upsertCredential(
+        webhookCredentialId,
+        new StringCredentialsImpl(
+          CredentialsScope.GLOBAL,
+          webhookCredentialId,
+          "Bearer token used by Gitea to call Jenkins Generic Webhook Trigger",
+          Secret.fromString(webhookToken)
+        )
+      )
+
+      upsertCredential(
+        nexusCredentialId,
+        new UsernamePasswordCredentialsImpl(
+          CredentialsScope.GLOBAL,
+          nexusCredentialId,
+          "Nexus Docker registry credentials used by Kaniko",
+          nexusUser,
+          nexusPassword
+        )
+      )
+
+      def filterText = '$' + 'GITEA_REF ' + '$' + 'GITEA_REPO'
+      def filterRegex = '^' + webhookBranch + ' ' + webhookRepo + '$'
+
+      def configXml = """<?xml version='1.1' encoding='UTF-8'?>
+      <flow-definition plugin="workflow-job">
+        <actions/>
+        <description>Automatic CI/CD job for the Software Factory demo. It reads ci/Jenkinsfile from Gitea, builds frontend/backend images, pushes them to Nexus, and deploys them to K3s.</description>
+        <keepDependencies>false</keepDependencies>
+        <properties/>
+        <triggers>
+          <org.jenkinsci.plugins.gwt.GenericTrigger plugin="generic-webhook-trigger">
+            <spec></spec>
+            <genericVariables>
+              <org.jenkinsci.plugins.gwt.GenericVariable>
+                <key>GITEA_REF</key>
+                <value>\$.ref</value>
+                <expressionType>JSONPath</expressionType>
+                <regexpFilter></regexpFilter>
+                <defaultValue></defaultValue>
+              </org.jenkinsci.plugins.gwt.GenericVariable>
+              <org.jenkinsci.plugins.gwt.GenericVariable>
+                <key>GITEA_REPO</key>
+                <value>\$.repository.full_name</value>
+                <expressionType>JSONPath</expressionType>
+                <regexpFilter></regexpFilter>
+                <defaultValue></defaultValue>
+              </org.jenkinsci.plugins.gwt.GenericVariable>
+            </genericVariables>
+            <genericRequestVariables/>
+            <genericHeaderVariables/>
+            <tokenCredentialId>${webhookCredentialId}</tokenCredentialId>
+            <causeString>Gitea push to \$GITEA_REF in \$GITEA_REPO</causeString>
+            <regexpFilterText>${filterText}</regexpFilterText>
+            <regexpFilterExpression>${filterRegex}</regexpFilterExpression>
+            <printPostContent>false</printPostContent>
+            <printContributedVariables>false</printContributedVariables>
+            <silentResponse>false</silentResponse>
+            <shouldNotFlattern>false</shouldNotFlattern>
+            <allowSeveralTriggersPerBuild>false</allowSeveralTriggersPerBuild>
+          </org.jenkinsci.plugins.gwt.GenericTrigger>
+        </triggers>
+        <disabled>false</disabled>
+        <definition class="org.jenkinsci.plugins.workflow.cps.CpsScmFlowDefinition" plugin="workflow-cps">
+          <scm class="hudson.plugins.git.GitSCM" plugin="git">
+            <configVersion>2</configVersion>
+            <userRemoteConfigs>
+              <hudson.plugins.git.UserRemoteConfig>
+                <url>${repoUrl}</url>
+              </hudson.plugins.git.UserRemoteConfig>
+            </userRemoteConfigs>
+            <branches>
+              <hudson.plugins.git.BranchSpec>
+                <name>*/main</name>
+              </hudson.plugins.git.BranchSpec>
+            </branches>
+            <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
+            <submoduleCfg class="empty-list"/>
+            <extensions/>
+          </scm>
+          <scriptPath>ci/Jenkinsfile</scriptPath>
+          <lightweight>true</lightweight>
+        </definition>
+      </flow-definition>
+      """
+
+      def oldJob = instance.getItemByFullName(jobName)
+      if (oldJob != null) {
+        oldJob.delete()
+      }
+
+      def input = new ByteArrayInputStream(configXml.getBytes("UTF-8"))
+      def job = instance.createProjectFromXML(jobName, input)
+      job.save()
+      instance.save()
+
+      println("configured Jenkins pipeline job: " + job.fullName)
+      println("repository: " + repoUrl)
+      println("webhook credential id: " + webhookCredentialId)
+      println("nexus credential id: " + nexusCredentialId)
+
+- name: Create or update Jenkins pipeline job and credentials through scriptText
+  ansible.builtin.shell: |
+    set -euo pipefail
+
+    cookie_jar=/tmp/jenkins-scriptText.cookies
+    response_file=/tmp/jenkins-scriptText.response
+    rm -f "$cookie_jar" "$response_file"
+
+    crumb_url='{{ jenkins_url }}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)'
+    crumb="$(curl -fsS \
+      -u '{{ jenkins_admin_user }}:{{ jenkins_admin_password }}' \
+      -c "$cookie_jar" \
+      "$crumb_url")"
+
+    http_code="$(curl -sS \
+      -u '{{ jenkins_admin_user }}:{{ jenkins_admin_password }}' \
+      -b "$cookie_jar" \
+      -c "$cookie_jar" \
+      -H "$crumb" \
+      --data-urlencode script@/tmp/configure-software-factory-job.groovy \
+      -o "$response_file" \
+      -w '%{http_code}' \
+      {{ jenkins_url }}/scriptText || true)"
+
+    cat "$response_file" || true
+    echo
+    echo "Jenkins scriptText HTTP status: $http_code"
+
+    test "$http_code" = "200"
+    grep -q 'configured Jenkins pipeline job' "$response_file"
+  args:
+    executable: /bin/bash
+  register: jenkins_job_script
+  retries: 10
+  delay: 15
+  until: jenkins_job_script.rc == 0 and ('configured Jenkins pipeline job' in jenkins_job_script.stdout)
+  changed_when: true
+  no_log: true
+
+- name: Show Jenkins job creation result
+  ansible.builtin.debug:
+    msg: "Jenkins job, Generic Webhook Trigger credential, and Nexus credential were configured successfully."
+
+- name: Wait for Jenkins job URL
+  ansible.builtin.uri:
+    url: "{{ jenkins_url }}/job/{{ jenkins_job_name }}/"
+    method: GET
+    user: "{{ jenkins_admin_user }}"
+    password: "{{ jenkins_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    return_content: false
+    use_proxy: false
+  register: jenkins_job_http
+  retries: 30
+  delay: 5
+  until: jenkins_job_http.status == 200
+
+- name: Read Gitea webhooks for the application repository
+  ansible.builtin.uri:
+    url: "{{ gitea_url }}/api/v1/repos/{{ gitea_admin_user }}/{{ gitea_repo_name }}/hooks"
+    method: GET
+    user: "{{ gitea_admin_user }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: 200
+    use_proxy: false
+  register: gitea_hooks
+  no_log: true
+
+- name: Delete stale Jenkins webhooks in Gitea
+  ansible.builtin.uri:
+    url: "{{ gitea_url }}/api/v1/repos/{{ gitea_admin_user }}/{{ gitea_repo_name }}/hooks/{{ item.id }}"
+    method: DELETE
+    user: "{{ gitea_admin_user }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    status_code: [204, 404]
+    use_proxy: false
+  loop: "{{ gitea_hooks.json | default([]) }}"
+  loop_control:
+    label: "{{ item.id | default('unknown') }}"
+  when:
+    - item.config is defined
+    - item.config.url is defined
+    - item.config.url == gitea_generic_webhook_url or '/git/notifyCommit' in item.config.url
+  no_log: true
+
+- name: Create authenticated Gitea webhook for Jenkins Generic Webhook Trigger
+  ansible.builtin.uri:
+    url: "{{ gitea_url }}/api/v1/repos/{{ gitea_admin_user }}/{{ gitea_repo_name }}/hooks"
+    method: POST
+    user: "{{ gitea_admin_user }}"
+    password: "{{ gitea_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      type: gitea
+      config:
+        url: "{{ gitea_generic_webhook_url }}"
+        content_type: json
+        http_method: POST
+        secret: "{{ gitea_webhook_secret }}"
+      authorization_header: "Bearer {{ gitea_webhook_token }}"
+      events:
+        - push
+      branch_filter: main
+      active: true
+    status_code: 201
+    use_proxy: false
+  no_log: true
+
+- name: Install Jenkins boot recovery script on cp1
+  ansible.builtin.copy:
+    dest: /usr/local/sbin/recover-jenkins-after-vagrant-boot.sh
+    owner: root
+    group: root
+    mode: "0755"
+    content: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+      echo "[jenkins-recovery] waiting for K3s API..."
+      for i in $(seq 1 120); do
+        if kubectl get nodes >/dev/null 2>&1; then
+          break
+        fi
+        sleep 5
+      done
+
+      echo "[jenkins-recovery] waiting for Jenkins StatefulSet..."
+      for i in $(seq 1 120); do
+        if kubectl -n jenkins get statefulset jenkins >/dev/null 2>&1; then
+          break
+        fi
+        sleep 5
+      done
+
+      phase="$(kubectl -n jenkins get pod jenkins-0 -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      deletion_ts="$(kubectl -n jenkins get pod jenkins-0 -o jsonpath='{.metadata.deletionTimestamp}' 2>/dev/null || true)"
+
+      echo "[jenkins-recovery] current Jenkins pod phase: ${phase:-missing}"
+
+      if [ "$phase" = "Unknown" ] || [ "$phase" = "Failed" ] || [ -n "$deletion_ts" ]; then
+        echo "[jenkins-recovery] deleting stale Jenkins pod..."
+        kubectl -n jenkins delete pod jenkins-0 --force --grace-period=0 --ignore-not-found=true
+      fi
+
+      echo "[jenkins-recovery] waiting for Jenkins rollout..."
+      kubectl -n jenkins rollout status statefulset/jenkins --timeout=900s || true
+
+      echo "[jenkins-recovery] final Jenkins state:"
+      kubectl -n jenkins get pods -o wide || true
+
+- name: Install Jenkins boot recovery systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/recover-jenkins-after-vagrant-boot.service
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      [Unit]
+      Description=Recover stale Jenkins pod after Vagrant VM reboot
+      Wants=k3s.service
+      After=k3s.service network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/recover-jenkins-after-vagrant-boot.sh
+      RemainAfterExit=no
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Enable Jenkins boot recovery service
+  ansible.builtin.systemd:
+    name: recover-jenkins-after-vagrant-boot.service
+    enabled: true
+    daemon_reload: true

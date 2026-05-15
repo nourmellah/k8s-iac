@@ -1,0 +1,100 @@
+---
+- name: Prepare every VM with base packages
+  hosts: control_plane:workers:tools
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - common
+
+- name: Configure the Tools VM services
+  hosts: tools
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - ci_host_tools
+    - nfs_server
+    - nexus
+    - bootstrap_jenkins_image
+    - gitea
+
+- name: Install K3s control-plane and sync project files
+  hosts: control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - k3s_server
+    - kubectl_client
+    - helm
+    - project_sync
+
+- name: Join only the two application workers to the cluster
+  hosts: workers
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - k3s_agent
+
+- name: Remove any stale Tools VM node from previous cluster runs
+  hosts: control_plane
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Delete stale worker-ci node if it exists from an older project version
+      ansible.builtin.shell: |
+        kubectl delete node worker-ci --ignore-not-found=true
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+- name: Verify Kubernetes topology before deploying workloads
+  hosts: control_plane
+  gather_facts: false
+  any_errors_fatal: true
+  tasks:
+    - name: Wait for required Kubernetes nodes to be Ready
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        for node in cp1 worker-app-1 worker-app-2; do
+          echo "Waiting for node/$node to be Ready..."
+          kubectl wait --for=condition=Ready "node/$node" --timeout=300s
+        done
+
+        if kubectl get node worker-ci >/dev/null 2>&1; then
+          echo "ERROR: worker-ci/tools VM must not be part of the K3s cluster."
+          kubectl get nodes -o wide
+          exit 1
+        fi
+
+        kubectl get nodes -o wide
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: false
+
+- name: Deploy Kubernetes platform pieces
+  hosts: control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - namespaces
+    - storage_stack
+    - mysql_stack
+    - cluster_dns
+    - registry_secret
+    - jenkins
+
+- name: Build and push the first frontend/backend images to Nexus
+  hosts: tools
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - bootstrap_hello_image
+
+- name: Deploy frontend and backend applications from Nexus
+  hosts: control_plane
+  gather_facts: true
+  any_errors_fatal: true
+  roles:
+    - app_stack

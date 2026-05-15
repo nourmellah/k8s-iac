@@ -1,0 +1,48 @@
+---
+- name: Create remote project root
+  ansible.builtin.file:
+    path: "{{ project_root_remote }}"
+    state: directory
+    owner: vagrant
+    group: vagrant
+    mode: '0755'
+
+- name: Copy top-level project docs to control-plane
+  ansible.builtin.copy:
+    src: "{{ project_root_local }}/README.md"
+    dest: "{{ project_root_remote }}/README.md"
+    owner: vagrant
+    group: vagrant
+    mode: '0644'
+
+- name: Copy kubernetes assets to control-plane
+  ansible.builtin.copy:
+    src: "{{ project_root_local }}/kubernetes/"
+    dest: "{{ project_root_remote }}/kubernetes/"
+    owner: vagrant
+    group: vagrant
+    mode: preserve
+
+- name: Copy frontend source to control-plane
+  ansible.builtin.copy:
+    src: "{{ project_root_local }}/frontend/"
+    dest: "{{ project_root_remote }}/frontend/"
+    owner: vagrant
+    group: vagrant
+    mode: preserve
+
+- name: Copy backend source to control-plane
+  ansible.builtin.copy:
+    src: "{{ project_root_local }}/backend/"
+    dest: "{{ project_root_remote }}/backend/"
+    owner: vagrant
+    group: vagrant
+    mode: preserve
+
+- name: Copy CI files to control-plane
+  ansible.builtin.copy:
+    src: "{{ project_root_local }}/ci/"
+    dest: "{{ project_root_remote }}/ci/"
+    owner: vagrant
+    group: vagrant
+    mode: preserve

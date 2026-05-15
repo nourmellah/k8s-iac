@@ -1,0 +1,73 @@
+project_root_local: "{{ playbook_dir }}/../.."
+project_root_remote: /opt/iac-k8s
+
+# Network layout
+master_ip: "192.168.56.10"
+worker_1_ip: "192.168.56.11"
+worker_2_ip: "192.168.56.12"
+tools_ip: "192.168.56.13"
+
+# Kubernetes namespaces
+app_namespace: hello
+hello_namespace: "{{ app_namespace }}"
+database_namespace: database
+jenkins_namespace: jenkins
+
+# Public service endpoints
+jenkins_url: "http://{{ master_ip }}:30080"
+gitea_url: "http://{{ tools_ip }}:30082"
+nexus_ui_url: "http://{{ tools_ip }}:30083"
+nexus_registry_host: "{{ tools_ip }}:30084"
+
+# Backward-compatible variable used by older tasks
+lab_domain_ip: "{{ master_ip }}"
+nexus_registry_ip: "{{ tools_ip }}"
+
+k3s_version: "v1.31.6+k3s1"
+helm_version: "3.16.4"
+
+# Gitea
+# The VM is named worker-ci in Vagrant, but functionally it is the Tools VM.
+gitea_admin_user: giteaadmin
+gitea_admin_password: "{{ vault_gitea_admin_password }}"
+gitea_repo_name: software-factory-app
+gitea_repo_url: "{{ gitea_url }}/{{ gitea_admin_user }}/{{ gitea_repo_name }}.git"
+
+# Jenkins
+jenkins_admin_user: admin
+jenkins_admin_password: "{{ vault_jenkins_admin_password }}"
+jenkins_job_name: software-factory-app
+jenkins_controller_image_name: "{{ nexus_registry_host }}/software-factory/jenkins-controller"
+jenkins_controller_image_tag: lab-secure-webhook
+jenkins_kubectl_agent_image_name: "{{ nexus_registry_host }}/software-factory/kubectl-agent"
+jenkins_kubectl_agent_image_tag: lab
+
+# Authenticated Generic Webhook Trigger configuration
+# Token value must come from ansible/inventories/dev/group_vars/vault.yml.
+# The token is stored in Jenkins as a Secret Text credential and sent by Gitea
+# using the Authorization: Bearer <token> header, never as a URL parameter.
+gitea_webhook_token: "{{ vault_gitea_webhook_token }}"
+gitea_webhook_secret: "{{ vault_gitea_webhook_secret }}"
+gitea_webhook_credential_id: gitea-webhook-token
+gitea_generic_webhook_url: "{{ jenkins_url }}/generic-webhook-trigger/invoke"
+jenkins_webhook_branch: refs/heads/main
+jenkins_webhook_repo: "{{ gitea_admin_user }}/{{ gitea_repo_name }}"
+
+# Nexus
+nexus_admin_user: admin
+nexus_admin_password: "{{ vault_nexus_admin_password }}"
+nexus_jenkins_credentials_id: nexus-registry-credentials
+frontend_image_name: "{{ nexus_registry_host }}/software-factory/frontend"
+backend_image_name: "{{ nexus_registry_host }}/software-factory/backend"
+bootstrap_image_tag: bootstrap
+
+# Database
+mysql_database: hello_db
+mysql_user: hello_user
+mysql_password: "{{ vault_mysql_password }}"
+mysql_root_password: "{{ vault_mysql_root_password }}"
+
+# NFS hosted on the Tools VM
+nfs_server_ip: "{{ tools_ip }}"
+nfs_exports_network: 192.168.56.0/24
+nfs_mysql_export_path: /srv/nfs/mysql

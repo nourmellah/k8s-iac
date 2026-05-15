@@ -1,0 +1,16 @@
+# Copy this file to vault.yml, adjust values if needed, then encrypt it:
+#   cp ansible/inventories/dev/group_vars/vault.yml.example ansible/inventories/dev/group_vars/vault.yml
+#   ansible-vault encrypt ansible/inventories/dev/group_vars/vault.yml
+# Run the playbook with:
+#   ansible-playbook --ask-vault-pass playbooks/site.yml
+
+vault_gitea_admin_password: "giteaadmin123"
+vault_jenkins_admin_password: "admin123"
+vault_nexus_admin_password: "admin123"
+vault_mysql_password: "hello_password_123"
+vault_mysql_root_password: "root_password_123"
+
+# Use strong random values in a real environment, for example:
+#   openssl rand -hex 32
+vault_gitea_webhook_token: "change-me-gitea-webhook-token-use-openssl-rand-hex-32"
+vault_gitea_webhook_secret: "change-me-gitea-webhook-secret-use-openssl-rand-hex-32"

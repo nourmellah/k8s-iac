@@ -1,0 +1,81 @@
+---
+- name: Detect private interface for K3s server node
+  ansible.builtin.shell: |
+    ip -o -4 addr show | awk -v ip="{{ ansible_host }}" '$4 ~ "^" ip "/" {print $2; exit}'
+  register: k3s_private_iface
+  changed_when: false
+  failed_when: k3s_private_iface.stdout | trim == ""
+
+- name: Check whether K3s server is already installed correctly
+  ansible.builtin.shell: |
+    test -x /usr/local/bin/k3s
+    systemctl list-unit-files k3s.service --no-legend | awk '{print $1}' | grep -qx k3s.service
+  args:
+    executable: /bin/bash
+  register: k3s_server_installed
+  changed_when: false
+  failed_when: false
+
+- name: Remove partial K3s server installation if present
+  ansible.builtin.shell: |
+    systemctl stop k3s >/dev/null 2>&1 || true
+    systemctl disable k3s >/dev/null 2>&1 || true
+    rm -f /usr/local/bin/k3s
+    rm -f /etc/systemd/system/k3s.service
+    rm -f /etc/systemd/system/k3s.service.env
+    systemctl daemon-reload
+  args:
+    executable: /bin/bash
+  when: k3s_server_installed.rc != 0
+  changed_when: false
+  failed_when: false
+
+- name: Install K3s server with retry protection
+  ansible.builtin.shell: |
+    set -o pipefail
+
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_VERSION="{{ k3s_version }}" \
+      INSTALL_K3S_EXEC="server \
+        --node-ip={{ ansible_host }} \
+        --advertise-address={{ ansible_host }} \
+        --write-kubeconfig-mode=644 \
+        --disable=traefik \
+        --flannel-backend=vxlan \
+        --flannel-iface={{ k3s_private_iface.stdout | trim }} \
+        --resolv-conf=/run/systemd/resolve/resolv.conf" \
+      sh -
+  args:
+    executable: /bin/bash
+  register: k3s_server_install
+  retries: 5
+  delay: 30
+  until: k3s_server_install.rc == 0
+  when: k3s_server_installed.rc != 0
+
+- name: Ensure K3s server service is enabled and started
+  ansible.builtin.systemd:
+    name: k3s
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for kubeconfig to exist
+  ansible.builtin.wait_for:
+    path: /etc/rancher/k3s/k3s.yaml
+    timeout: 180
+
+- name: Wait for K3s API server to respond locally
+  ansible.builtin.shell: |
+    kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get nodes >/dev/null
+  args:
+    executable: /bin/bash
+  register: k3s_api_ready
+  retries: 60
+  delay: 5
+  until: k3s_api_ready.rc == 0
+  changed_when: false
+
+- name: Show selected K3s server network interface
+  ansible.builtin.debug:
+    msg: "K3s server {{ inventory_hostname }} uses {{ k3s_private_iface.stdout | trim }} for {{ ansible_host }}"

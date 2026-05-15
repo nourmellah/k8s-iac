@@ -1,0 +1,94 @@
+---
+- name: Detect private interface for K3s worker node
+  ansible.builtin.shell: |
+    ip -o -4 addr show | awk -v ip="{{ ansible_host }}" '$4 ~ "^" ip "/" {print $2; exit}'
+  register: k3s_private_iface
+  changed_when: false
+  failed_when: k3s_private_iface.stdout | trim == ""
+
+- name: Wait for K3s API server to become reachable
+  ansible.builtin.wait_for:
+    host: "{{ k3s_server_ip }}"
+    port: 6443
+    timeout: 300
+    sleep: 5
+
+- name: Read K3s server token from control plane
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/token
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  become: true
+  register: k3s_server_token_raw
+
+- name: Check whether K3s agent is already installed correctly
+  ansible.builtin.shell: |
+    test -x /usr/local/bin/k3s-agent
+    systemctl list-unit-files k3s-agent.service --no-legend | awk '{print $1}' | grep -qx k3s-agent.service
+  args:
+    executable: /bin/bash
+  register: k3s_agent_installed
+  changed_when: false
+  failed_when: false
+
+- name: Remove partial K3s agent installation if present
+  ansible.builtin.shell: |
+    systemctl stop k3s-agent >/dev/null 2>&1 || true
+    systemctl disable k3s-agent >/dev/null 2>&1 || true
+    rm -f /usr/local/bin/k3s-agent
+    rm -f /usr/local/bin/k3s
+    rm -f /etc/systemd/system/k3s-agent.service
+    rm -f /etc/systemd/system/k3s-agent.service.env
+    systemctl daemon-reload
+  args:
+    executable: /bin/bash
+  when: k3s_agent_installed.rc != 0
+  changed_when: false
+  failed_when: false
+
+- name: Install K3s agent with retry protection
+  ansible.builtin.shell: |
+    set -euxo pipefail
+
+    curl -sfL https://get.k3s.io | \
+      INSTALL_K3S_VERSION="{{ k3s_version }}" \
+      K3S_URL="https://{{ k3s_server_ip }}:6443" \
+      K3S_TOKEN="{{ k3s_server_token_raw.content | b64decode | trim }}" \
+      INSTALL_K3S_EXEC="agent \
+        --node-ip={{ ansible_host }} \
+        --flannel-iface={{ k3s_private_iface.stdout | trim }} \
+        --resolv-conf=/run/systemd/resolve/resolv.conf{% for label in k3s_node_labels | default([]) %} \
+        --node-label {{ label }}{% endfor %}" \
+      sh -
+  args:
+    executable: /bin/bash
+  register: k3s_agent_install
+  retries: 5
+  delay: 30
+  until: k3s_agent_install.rc == 0
+  when: k3s_agent_installed.rc != 0
+
+- name: Ensure K3s agent service is enabled and started
+  ansible.builtin.systemd:
+    name: k3s-agent
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for this worker node to be Ready
+  ansible.builtin.shell: |
+    kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s
+  args:
+    executable: /bin/bash
+  delegate_to: "{{ groups['control_plane'][0] }}"
+  become: true
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: k3s_worker_ready
+  retries: 3
+  delay: 10
+  until: k3s_worker_ready.rc == 0
+  changed_when: false
+
+- name: Show selected K3s worker network interface
+  ansible.builtin.debug:
+    msg: "K3s worker {{ inventory_hostname }} uses {{ k3s_private_iface.stdout | trim }} for {{ ansible_host }}"
