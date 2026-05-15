@@ -1,0 +1,148 @@
+pipeline {
+  agent {
+    kubernetes {
+      defaultContainer 'kubectl'
+      yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-build-agent
+spec:
+  serviceAccountName: jenkins
+  imagePullSecrets:
+    - name: nexus-registry-cred
+  containers:
+    - name: kubectl
+      image: 192.168.56.13:30084/software-factory/kubectl-agent:lab
+      imagePullPolicy: Always
+      command:
+        - cat
+      tty: true
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:v1.23.2-debug
+      command:
+        - /busybox/cat
+      tty: true
+'''
+    }
+  }
+
+  triggers {
+    GenericTrigger(
+      genericVariables: [
+        [key: 'GITEA_REF', value: '$.ref'],
+        [key: 'GITEA_REPO', value: '$.repository.full_name']
+      ],
+      tokenCredentialId: 'gitea-webhook-token',
+      causeString: 'Gitea push to $GITEA_REF in $GITEA_REPO',
+      regexpFilterText: '$GITEA_REF $GITEA_REPO',
+      regexpFilterExpression: '^refs/heads/main giteaadmin/software-factory-app$',
+      printContributedVariables: false,
+      printPostContent: false,
+      silentResponse: false
+    )
+  }
+
+  environment {
+    REGISTRY = '192.168.56.13:30084'
+    FRONTEND_IMAGE = 'software-factory/frontend'
+    BACKEND_IMAGE = 'software-factory/backend'
+    IMAGE_TAG = "build-${BUILD_NUMBER}"
+  }
+
+  options {
+    disableConcurrentBuilds()
+  }
+
+  stages {
+    stage('Checkout from Gitea') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Prepare registry authentication') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'nexus-registry-credentials', usernameVariable: 'REGISTRY_USER', passwordVariable: 'REGISTRY_PASS')]) {
+          container('kaniko') {
+            sh '''
+              set -eu
+              mkdir -p /kaniko/.docker
+              AUTH="$(printf "%s" "${REGISTRY_USER}:${REGISTRY_PASS}" | base64 | tr -d '\n')"
+
+              cat > /kaniko/.docker/config.json <<EOF_AUTH
+{
+  "auths": {
+    "${REGISTRY}": {
+      "auth": "${AUTH}"
+    }
+  }
+}
+EOF_AUTH
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Build and push backend image') {
+      steps {
+        container('kaniko') {
+          sh '''
+            set -eu
+            /kaniko/executor \
+              --context "${WORKSPACE}/backend" \
+              --dockerfile "${WORKSPACE}/backend/Dockerfile" \
+              --destination "${REGISTRY}/${BACKEND_IMAGE}:${IMAGE_TAG}" \
+              --destination "${REGISTRY}/${BACKEND_IMAGE}:latest" \
+              --insecure \
+              --skip-tls-verify
+          '''
+        }
+      }
+    }
+
+    stage('Build and push frontend image') {
+      steps {
+        container('kaniko') {
+          sh '''
+            set -eu
+            /kaniko/executor \
+              --context "${WORKSPACE}/frontend" \
+              --dockerfile "${WORKSPACE}/frontend/Dockerfile" \
+              --destination "${REGISTRY}/${FRONTEND_IMAGE}:${IMAGE_TAG}" \
+              --destination "${REGISTRY}/${FRONTEND_IMAGE}:latest" \
+              --insecure \
+              --skip-tls-verify
+          '''
+        }
+      }
+    }
+
+    stage('Deploy to K3s') {
+      steps {
+        container('kubectl') {
+          sh '''
+            set -eu
+
+            kubectl apply -f kubernetes/backend/secret.yaml
+            kubectl apply -f kubernetes/backend/service.yaml
+            kubectl apply -f kubernetes/backend/pdb.yaml
+            kubectl apply -f kubernetes/backend/deployment.yaml
+            kubectl apply -f kubernetes/frontend/service.yaml
+            kubectl apply -f kubernetes/frontend/pdb.yaml
+            kubectl apply -f kubernetes/frontend/deployment.yaml
+
+            kubectl -n hello set image deployment/backend backend=${REGISTRY}/${BACKEND_IMAGE}:${IMAGE_TAG}
+            kubectl -n hello set env deployment/backend APP_VERSION=${IMAGE_TAG}
+            kubectl -n hello set image deployment/frontend frontend=${REGISTRY}/${FRONTEND_IMAGE}:${IMAGE_TAG}
+
+            kubectl -n hello rollout status deployment/backend --timeout=600s
+            kubectl -n hello rollout status deployment/frontend --timeout=600s
+          '''
+        }
+      }
+    }
+  }
+}

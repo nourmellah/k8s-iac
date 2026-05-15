@@ -1,0 +1,19 @@
+# Vagrant runtime state
+.vagrant/
+
+# Python/cache/editor noise
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+.vscode/
+
+# Ansible Vault helpers
+.vault-pass
+*.retry
+
+.git/
+.vagrant/
+*.log
+*-VBoxHeadless-*.log
+.ansible/inventories/dev/group_vars/all/vault.yml

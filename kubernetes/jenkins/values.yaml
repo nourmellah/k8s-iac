@@ -1,0 +1,65 @@
+controller:
+  admin:
+    username: admin
+    password: "CHANGE_ME_FROM_ANSIBLE_VAULT"
+    createSecret: true
+
+  # Use a custom controller image pushed to Nexus by Ansible before Helm installs Jenkins.
+  # The Jenkins Helm chart expects controller.image to be a map, not a single string.
+  # Keeping this schema avoids Helm template errors in chart tests and deployment templates.
+  image:
+    registry: "192.168.56.13:30084"
+    repository: "software-factory/jenkins-controller"
+    tag: "lab-secure-webhook"
+    tagLabel: ""
+    pullPolicy: Always
+  imagePullSecretName: nexus-registry-cred
+
+  # Plugins are already baked into jenkins-controller/Dockerfile. Do not let the
+  # Helm init container download plugins into /usr/share/jenkins/ref/plugins.
+  installPlugins: false
+  additionalPlugins: []
+
+  serviceType: NodePort
+  servicePort: 8080
+  nodePort: 30080
+
+  numExecutors: 0
+
+  # Professor requirement: Jenkins belongs to the Kubernetes master/control-plane VM.
+  nodeSelector:
+    kubernetes.io/hostname: cp1
+
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1500m"
+      memory: "1536Mi"
+
+  javaOpts: "-Xms256m -Xmx1024m -Djenkins.install.runSetupWizard=false"
+
+  JCasC:
+    defaultConfig: true
+
+  probes:
+    startupProbe:
+      failureThreshold: 180
+      timeoutSeconds: 10
+    readinessProbe:
+      failureThreshold: 24
+      timeoutSeconds: 10
+    livenessProbe:
+      failureThreshold: 24
+      timeoutSeconds: 10
+      
+  jenkinsUrl: "http://192.168.56.10:30080"
+
+persistence:
+  enabled: true
+  storageClass: local-path
+  size: 4Gi
+
+agent:
+  enabled: true
